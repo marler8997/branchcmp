@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+import sys
+import os
+import subprocess
+import json
+
+cmd_args = sys.argv[1:]
+
+# TODO: parse command-line options
+
+if len(cmd_args) == 0:
+    print("Usage: branchcmp <config-file>.json")
+    sys.exit(1)
+
+if len(cmd_args) != 1:
+    sys.exit("expected 1 command-line argument but got {}".format(len(cmd_args)))
+
+config_file = cmd_args[0]
+
+with open(config_file, "r") as file:
+    try:
+        config = json.load(file)
+    except json.JSONDecodeError as e:
+        print("{}: {}".format(config_file, e))
+        sys.exit(1)
+
+git_cmd = ["git"]
+
+if "repo" in config:
+    repo = config["repo"]
+    if not os.path.isabs(repo):
+        repo = os.path.join(os.path.dirname(os.path.abspath(config_file)), repo)
+    print("repo: {}".format(repo))
+    git_cmd += ["-C", repo]
+
+def get_json_prop(obj, prop):
+    if not prop in obj:
+        sys.exit("Error: json object is missing '{}' property".format(prop))
+    return obj[prop]
+
+branch1 = get_json_prop(config, 'branch1')
+print("branch1: {}".format(branch1))
+branch2 = get_json_prop(config, 'branch2')
+print("branch2: {}".format(branch2))
+
+ignore = []
+if "ignore" in config:
+    ignore = config["ignore"]
+
+def run_output(args):
+    try:
+        print(" ".join(args))
+        return subprocess.check_output(args).decode('utf8')
+    except subprocess.CalledProcessError as e:
+        if e.output:
+            print(e.output)
+        print("command '{}' failed with exit code {}".format(args[0], e.returncode))
+        sys.exit(1)
+
+rev_parse_out = run_output(git_cmd + ["rev-parse", branch1, branch2]).split()
+branch1sha = rev_parse_out[0]
+branch2sha = rev_parse_out[1]
+if branch1sha == branch2sha:
+    print("branches are the same: {}".format(branch1sha))
+    sys.exit(0)
+
+print("{}: {}".format(branch1, branch1sha))
+print("{}: {}".format(branch2, branch2sha))
+
+merge_base = run_output(git_cmd + ["merge-base", branch1, branch2]).strip()
+print("merge-base: {}".format(merge_base))
+
+def print_sep():
+    print("--------------------------------------------------------------------------------")
+
+print_sep()
+branch1log = run_output(git_cmd + ["log", "--pretty=oneline", merge_base + ".." + branch1])
+print(branch1log)
+print_sep()
+branch2log = run_output(git_cmd + ["log", "--pretty=oneline", merge_base + ".." + branch2])
+print(branch2log)
+print_sep()
+
+class CommitShaTitle:
+    def __init__(self, line):
+        self.sha = line[0:40]
+        self.title = line[41:]
+
+branch1commits = []
+branch2commits = []
+
+for line in branch1log.splitlines():
+    branch1commits.append(CommitShaTitle(line))
+for line in branch2log.splitlines():
+    branch2commits.append(CommitShaTitle(line))
+
+if branch1sha == merge_base:
+    print("'{}' is {} commit(s) ahead of '{}'".format(
+        branch2, len(branch2commits) - len(branch1commits), branch1))
+    sys.exit(0)
+if branch2sha == merge_base:
+    print("'{}' is {} commit(s) ahead of '{}'".format(
+        branch1, len(branch1commits) - len(branch2commits), branch2))
+    sys.exit(0)
+
+print("{} has {} commit(s) since merge-base".format(branch1, len(branch1commits)))
+print("{} has {} commit(s) since merge-base".format(branch2, len(branch2commits)))
+
+branch1show = []
+branch2show = []
+matching_titles = []
+branch1ignore = []
+branch2ignore = []
+
+# TODO: can there be commits with the same SHA?  Maybe if there was a merge?
+
+for b1commit in branch1commits:
+    if b1commit.sha in ignore:
+        branch1ignore.append(b1commit)
+    else:
+        branch1show.append(b1commit)
+    for b2commit in branch2commits:
+        if b1commit.title == b2commit.title:
+            matching_titles.append((b1commit, b2commit))
+for b2commit in branch2commits:
+    if b2commit.sha in ignore:
+        branch2ignore.append(b2commit)
+    else:
+        branch2show.append(b2commit)
+    #for b1commit in branch1commits:
+        # DON'T CHECK MATCHING TITLE, ALREADY CHECKED
+    #print("SHA '{}' title '{}'".format(commit.sha, commit.title))
+
+print_sep()
+print("{} commit(s) with matching title".format(len(matching_titles)))
+print("{} commit(s) ignored from branch '{}'".format(len(branch1ignore), branch1))
+print("{} commit(s) ignored from branch '{}'".format(len(branch2ignore), branch2))
+print_sep()
+print("showing {} commits from {}:".format(len(branch1show), branch1))
+for commit in branch1show:
+    print("{} {}".format(commit.sha, commit.title))
+print_sep()
+print("showing {} commits from {}:".format(len(branch2show), branch2))
+for commit in branch2show:
+    print("{} {}".format(commit.sha, commit.title))
